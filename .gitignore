@@ -1,0 +1,8 @@
+build/
+private/
+.cache/
+.venv/
+.vscode/
+.zed/
+
+*.onnx
