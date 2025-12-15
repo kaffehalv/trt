@@ -70,7 +70,10 @@ bool parseOnnx(const std::string &onnxPath, std::unique_ptr<IBuilder> &builder,
     return false;
   }
 
-  network.reset(builder->createNetworkV2(0U));
+  // In TensorRT 10 we can drop the expliciti batch (implicit batch is removed).
+  network.reset(builder->createNetworkV2(
+      1U << (uint32_t)
+          nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
   if (!network) {
     std::cerr << "Failed to create network\n";
     return false;
@@ -153,7 +156,11 @@ std::unique_ptr<ICudaEngine> buildEngineForBatch(IRuntime &runtime,
     return nullptr;
   }
 
-  config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1 GB
+  // Expose this?
+  config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 12ULL << 30);
+
+  // Expose this?
+  config->setBuilderOptimizationLevel(3);
 
   if (builder.platformHasFastFp16()) {
     config->setFlag(BuilderFlag::kFP16);

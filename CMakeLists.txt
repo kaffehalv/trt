@@ -23,6 +23,7 @@ find_path(TENSORRT_INCLUDE_DIR
         /usr/include/x86_64-linux-gnu
         /usr/local/include
         /usr/local/TensorRT/include
+        /usr/local/tensorrt-cuda12.2-8.6.1/include
         /usr/local/tensorrt-cuda12.2-10.4.0.26/include
 )
 
@@ -33,6 +34,7 @@ find_library(TENSORRT_LIB_NVINFER
         /usr/lib/x86_64-linux-gnu
         /usr/local/lib
         /usr/local/TensorRT/lib
+        /usr/local/tensorrt-cuda12.2-8.6.1/lib
         /usr/local/tensorrt-cuda12.2-10.4.0.26/lib
 )
 
@@ -43,6 +45,7 @@ find_library(TENSORRT_LIB_NVINFER_PLUGIN
         /usr/lib/x86_64-linux-gnu
         /usr/local/lib
         /usr/local/TensorRT/lib
+        /usr/local/tensorrt-cuda12.2-8.6.1/lib
         /usr/local/tensorrt-cuda12.2-10.4.0.26/lib
 )
 
@@ -53,6 +56,7 @@ find_library(TENSORRT_LIB_NVONNXPARSER
         /usr/lib/x86_64-linux-gnu
         /usr/local/lib
         /usr/local/TensorRT/lib
+        /usr/local/tensorrt-cuda12.2-8.6.1/lib
         /usr/local/tensorrt-cuda12.2-10.4.0.26/lib
 )
 
