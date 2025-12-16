@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <driver_types.h>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -212,7 +213,21 @@ struct Buffers {
   std::vector<std::string> tensorNames;
   std::vector<bool> isInput; // input/output tag
 
-  ~Buffers() {
+  Buffers() = default;
+  ~Buffers() { release(); }
+  Buffers(const Buffers &other) = delete;
+  Buffers &operator=(const Buffers &other) = delete;
+
+  Buffers(Buffers &&other) noexcept { steal(std::move(other)); }
+  Buffers &operator=(Buffers &&other) noexcept {
+    if (this != &other) {
+      release();
+      steal(std::move(other));
+    }
+    return *this;
+  }
+
+  void release() {
     for (void *p : devicePtrs) {
       if (p) {
         cudaFree(p);
@@ -223,6 +238,22 @@ struct Buffers {
       if (p) {
         cudaFreeHost(p);
       }
+    }
+  }
+
+  void steal(Buffers &&other) {
+    devicePtrs = other.devicePtrs;
+    hostPtrs = other.hostPtrs;
+    bytes = other.bytes;
+    tensorNames = other.tensorNames;
+    isInput = other.isInput;
+
+    for (auto &p : other.devicePtrs) {
+      p = nullptr;
+    }
+
+    for (auto &p : other.hostPtrs) {
+      p = nullptr;
     }
   }
 };
@@ -284,6 +315,45 @@ Buffers allocateBuffers(ICudaEngine &engine, IExecutionContext &context) {
   return buffers;
 }
 
+struct Runner {
+  std::unique_ptr<IExecutionContext> context{};
+  Buffers buffers{};
+  cudaStream_t stream{};
+
+  Runner() = default;
+
+  Runner(ICudaEngine &engine, const InputInfo &inputInfo, int batchSize)
+      : context{engine.createExecutionContext()} {
+    if (!context) {
+      throw std::runtime_error("Failed to create execution context");
+    }
+
+    if (inputInfo.dynamicBatch) {
+      Dims runtimeDims = inputInfo.dims;
+      runtimeDims.d[0] = batchSize;
+
+      if (!context->setInputShape(inputInfo.name.c_str(), runtimeDims)) {
+        throw std::runtime_error("setInputShape failed");
+      }
+    }
+
+    buffers = allocateBuffers(engine, *context);
+
+    const int nbTensors = static_cast<int>(buffers.tensorNames.size());
+    for (int i = 0; i < nbTensors; ++i) {
+      const char *name = buffers.tensorNames[i].c_str();
+      if (!context->setTensorAddress(name, buffers.devicePtrs[i])) {
+        throw std::runtime_error(std::string("setTensorAddress failed for ") +
+                                 name);
+      }
+    }
+
+    cudaStreamCreate(&stream);
+  }
+
+  ~Runner() { cudaStreamDestroy(stream); }
+};
+
 inline bool
 time_is_up(const std::chrono::time_point<std::chrono::high_resolution_clock> &t,
            const double duration) {
@@ -292,39 +362,39 @@ time_is_up(const std::chrono::time_point<std::chrono::high_resolution_clock> &t,
              .count() > duration;
 }
 
-double benchmark_for(IExecutionContext &context, cudaStream_t stream,
-                     Buffers &buffers, double duration) {
+double benchmark_for(Runner &runner, double duration) {
   int iters = 0;
   auto t0 = std::chrono::high_resolution_clock::now();
 
   while (!time_is_up(t0, duration)) {
     // H2D for inputs
-    for (int i = 0; i < (int)buffers.tensorNames.size(); ++i) {
-      if (!buffers.isInput[i]) {
+    for (int i = 0; i < (int)runner.buffers.tensorNames.size(); ++i) {
+      if (!runner.buffers.isInput[i]) {
         continue;
       }
-      cudaMemcpyAsync(buffers.devicePtrs[i], buffers.hostPtrs[i],
-                      buffers.bytes[i], cudaMemcpyHostToDevice, stream);
+      cudaMemcpyAsync(runner.buffers.devicePtrs[i], runner.buffers.hostPtrs[i],
+                      runner.buffers.bytes[i], cudaMemcpyHostToDevice,
+                      runner.stream);
     }
 
-    if (!context.enqueueV3(stream)) {
-      cudaStreamDestroy(stream);
+    if (!runner.context->enqueueV3(runner.stream)) {
       throw std::runtime_error("enqueueV3 failed during benchmark");
     }
 
     // D2H for outputs
-    for (int i = 0; i < (int)buffers.tensorNames.size(); ++i) {
-      if (buffers.isInput[i]) {
+    for (int i = 0; i < (int)runner.buffers.tensorNames.size(); ++i) {
+      if (runner.buffers.isInput[i]) {
         continue;
       }
-      cudaMemcpyAsync(buffers.hostPtrs[i], buffers.devicePtrs[i],
-                      buffers.bytes[i], cudaMemcpyDeviceToHost, stream);
+      cudaMemcpyAsync(runner.buffers.hostPtrs[i], runner.buffers.devicePtrs[i],
+                      runner.buffers.bytes[i], cudaMemcpyDeviceToHost,
+                      runner.stream);
     }
 
     iters++;
   }
 
-  cudaStreamSynchronize(stream);
+  cudaStreamSynchronize(runner.stream);
   auto t1 = std::chrono::high_resolution_clock::now();
 
   return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
@@ -333,41 +403,14 @@ double benchmark_for(IExecutionContext &context, cudaStream_t stream,
 // Benchmark an engine at a particular batch size (ms / image)
 double benchmarkEngine(ICudaEngine &engine, const InputInfo &inputInfo,
                        int batchSize) {
-  std::unique_ptr<IExecutionContext> context{engine.createExecutionContext()};
-  if (!context) {
-    throw std::runtime_error("Failed to create execution context");
-  }
-
-  if (inputInfo.dynamicBatch) {
-    Dims runtimeDims = inputInfo.dims;
-    runtimeDims.d[0] = batchSize;
-
-    if (!context->setInputShape(inputInfo.name.c_str(), runtimeDims)) {
-      throw std::runtime_error("setInputShape failed");
-    }
-  }
-
-  Buffers buffers = allocateBuffers(engine, *context);
-
-  const int nbTensors = static_cast<int>(buffers.tensorNames.size());
-  for (int i = 0; i < nbTensors; ++i) {
-    const char *name = buffers.tensorNames[i].c_str();
-    if (!context->setTensorAddress(name, buffers.devicePtrs[i])) {
-      throw std::runtime_error(std::string("setTensorAddress failed for ") +
-                               name);
-    }
-  }
-
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
+  std::vector<Runner> runners;
+  runners.emplace_back(engine, inputInfo, batchSize);
 
   // Warmup.
-  benchmark_for(*context, stream, buffers, 2);
+  benchmark_for(runners[0], 2);
 
   // Timed iterations.
-  const double msPerIter = benchmark_for(*context, stream, buffers, 20);
-
-  cudaStreamDestroy(stream);
+  const double msPerIter = benchmark_for(runners[0], 20);
 
   return msPerIter / static_cast<double>(batchSize);
 }
