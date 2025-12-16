@@ -1,6 +1,6 @@
+#include "NvInferPlugin.h"
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
-#include "NvInferPlugin.h"
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -131,7 +131,8 @@ bool parseOnnx(const std::string &onnxPath, std::unique_ptr<IBuilder> &builder,
 }
 
 // Build engine for a specific batch size using an optimization profile
-std::unique_ptr<ICudaEngine> buildEngineForBatch(IRuntime& runtime, IBuilder &builder,
+std::unique_ptr<ICudaEngine> buildEngineForBatch(IRuntime &runtime,
+                                                 IBuilder &builder,
                                                  INetworkDefinition &network,
                                                  const InputInfo &inputInfo,
                                                  int batchSize) {
@@ -253,20 +254,21 @@ Buffers allocateBuffers(ICudaEngine &engine, IExecutionContext &context) {
   return buffers;
 }
 
-inline bool time_is_up(const std::chrono::time_point<std::chrono::high_resolution_clock> &t, const double duration)
-{
-  return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t).count() > duration;
+inline bool
+time_is_up(const std::chrono::time_point<std::chrono::high_resolution_clock> &t,
+           const double duration) {
+  return std::chrono::duration<double>(
+             std::chrono::high_resolution_clock::now() - t)
+             .count() > duration;
 }
 
-double benchmark_for(IExecutionContext &context, cudaStream_t &stream, double duration)
-{
+double benchmark_for(IExecutionContext &context, cudaStream_t &stream,
+                     double duration) {
   int iters = 0;
 
   auto t0 = std::chrono::high_resolution_clock::now();
-  while (!time_is_up(t0, duration))
-  {
-    if (!context.enqueueV3(stream))
-    {
+  while (!time_is_up(t0, duration)) {
+    if (!context.enqueueV3(stream)) {
       cudaStreamDestroy(stream);
       throw std::runtime_error("enqueueV3 failed during benchmark");
     }
@@ -280,34 +282,27 @@ double benchmark_for(IExecutionContext &context, cudaStream_t &stream, double du
 
 // Benchmark an engine at a particular batch size (ms / image)
 double benchmarkEngine(ICudaEngine &engine, const InputInfo &inputInfo,
-                       int batchSize)
-{
+                       int batchSize) {
   std::unique_ptr<IExecutionContext> context{engine.createExecutionContext()};
-  if (!context)
-  {
+  if (!context) {
     throw std::runtime_error("Failed to create execution context");
   }
 
-  if (inputInfo.dynamicBatch)
-  {
+  if (inputInfo.dynamicBatch) {
     Dims runtimeDims = inputInfo.dims;
     runtimeDims.d[0] = batchSize;
 
-    if (!context->setInputShape(inputInfo.name.c_str(), runtimeDims))
-    {
+    if (!context->setInputShape(inputInfo.name.c_str(), runtimeDims)) {
       throw std::runtime_error("setInputShape failed");
     }
   }
 
- 
   Buffers buffers = allocateBuffers(engine, *context);
 
   const int nbTensors = static_cast<int>(buffers.tensorNames.size());
-  for (int i = 0; i < nbTensors; ++i)
-  {
+  for (int i = 0; i < nbTensors; ++i) {
     const char *name = buffers.tensorNames[i].c_str();
-    if (!context->setTensorAddress(name, buffers.devicePtrs[i]))
-    {
+    if (!context->setTensorAddress(name, buffers.devicePtrs[i])) {
       throw std::runtime_error(std::string("setTensorAddress failed for ") +
                                name);
     }
