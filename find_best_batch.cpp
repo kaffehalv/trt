@@ -207,12 +207,21 @@ std::unique_ptr<ICudaEngine> buildEngineForBatch(IRuntime &runtime,
 
 struct Buffers {
   std::vector<void *> devicePtrs;
+  std::vector<void *> hostPtrs;   // pinned host buffers
+  std::vector<std::size_t> bytes; // size per tensor
   std::vector<std::string> tensorNames;
+  std::vector<bool> isInput; // input/output tag
 
   ~Buffers() {
     for (void *p : devicePtrs) {
       if (p) {
         cudaFree(p);
+      }
+    }
+
+    for (void *p : hostPtrs) {
+      if (p) {
+        cudaFreeHost(p);
       }
     }
   }
@@ -224,7 +233,10 @@ Buffers allocateBuffers(ICudaEngine &engine, IExecutionContext &context) {
   const int nbTensors = engine.getNbIOTensors();
 
   buffers.devicePtrs.reserve(nbTensors);
+  buffers.hostPtrs.reserve(nbTensors);
+  buffers.bytes.reserve(nbTensors);
   buffers.tensorNames.reserve(nbTensors);
+  buffers.isInput.reserve(nbTensors);
 
   for (int i = 0; i < nbTensors; ++i) {
     const char *name = engine.getIOTensorName(i);
@@ -241,14 +253,32 @@ Buffers allocateBuffers(ICudaEngine &engine, IExecutionContext &context) {
     int64_t numElems = volume(shape);
     std::size_t bytes = static_cast<std::size_t>(numElems) * elementSize(dt);
 
+    // Determine IO direction
+    const bool input = (engine.getTensorIOMode(name) == TensorIOMode::kINPUT);
+
     void *dptr = nullptr;
-    cudaError_t err = cudaMalloc(&dptr, bytes);
-    if (err != cudaSuccess) {
+    if (cudaMalloc(&dptr, bytes) != cudaSuccess) {
       throw std::runtime_error("cudaMalloc failed for tensor " +
                                std::string(name));
     }
 
+    void *hptr = nullptr;
+    if (cudaMallocHost(&hptr, bytes) != cudaSuccess) {
+      cudaFree(dptr);
+      throw std::runtime_error("cudaMallocHost failed for tensor " +
+                               std::string(name));
+    }
+
+    // Optional: initialize input host buffers so H2D isn't copying
+    // uninitialized memory
+    if (input) {
+      std::memset(hptr, 0, bytes);
+    }
+
     buffers.devicePtrs.push_back(dptr);
+    buffers.hostPtrs.push_back(hptr);
+    buffers.bytes.push_back(bytes);
+    buffers.isInput.push_back(input);
   }
 
   return buffers;
@@ -262,18 +292,38 @@ time_is_up(const std::chrono::time_point<std::chrono::high_resolution_clock> &t,
              .count() > duration;
 }
 
-double benchmark_for(IExecutionContext &context, cudaStream_t &stream,
-                     double duration) {
+double benchmark_for(IExecutionContext &context, cudaStream_t stream,
+                     Buffers &buffers, double duration) {
   int iters = 0;
-
   auto t0 = std::chrono::high_resolution_clock::now();
+
   while (!time_is_up(t0, duration)) {
+    // H2D for inputs
+    for (int i = 0; i < (int)buffers.tensorNames.size(); ++i) {
+      if (!buffers.isInput[i]) {
+        continue;
+      }
+      cudaMemcpyAsync(buffers.devicePtrs[i], buffers.hostPtrs[i],
+                      buffers.bytes[i], cudaMemcpyHostToDevice, stream);
+    }
+
     if (!context.enqueueV3(stream)) {
       cudaStreamDestroy(stream);
       throw std::runtime_error("enqueueV3 failed during benchmark");
     }
+
+    // D2H for outputs
+    for (int i = 0; i < (int)buffers.tensorNames.size(); ++i) {
+      if (buffers.isInput[i]) {
+        continue;
+      }
+      cudaMemcpyAsync(buffers.hostPtrs[i], buffers.devicePtrs[i],
+                      buffers.bytes[i], cudaMemcpyDeviceToHost, stream);
+    }
+
     iters++;
   }
+
   cudaStreamSynchronize(stream);
   auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -312,10 +362,10 @@ double benchmarkEngine(ICudaEngine &engine, const InputInfo &inputInfo,
   cudaStreamCreate(&stream);
 
   // Warmup.
-  benchmark_for(*context, stream, 3);
+  benchmark_for(*context, stream, buffers, 2);
 
   // Timed iterations.
-  const double msPerIter = benchmark_for(*context, stream, 30);
+  const double msPerIter = benchmark_for(*context, stream, buffers, 20);
 
   cudaStreamDestroy(stream);
 
