@@ -152,7 +152,11 @@ std::unique_ptr<ICudaEngine> buildEngineForBatch(IRuntime& runtime, IBuilder &bu
     return nullptr;
   }
 
-  config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1 GB
+  // Expose this?
+  config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 12ULL << 30);
+
+  // Expose this?
+  config->setBuilderOptimizationLevel(3);
 
   if (builder.platformHasFastFp16()) {
     config->setFlag(BuilderFlag::kFP16);
